@@ -1,0 +1,86 @@
+---
+title: "Exploratory Data Analysis"
+author: "Ruan de Wet"
+date: "2022-10-17"
+output: html_document
+---
+
+## Introduction
+
+To assess, calibrate, and validate our SNAPGRAZE soil carbon model, we have several datasets. The purpose of this script is to get comfortable with what each one looks like and represents. There's probably more that we could do with this, but we'll keep it short and sweet for now. 
+
+```{r Load packages}
+
+library("readr")
+
+library("tidyr")
+library("dplyr")
+# library("stringr")
+
+library("ggplot2")
+
+library("sf")
+library("tmap")
+
+# devtools::install_github("ruan-de-wet/SNAPGRAZEr")
+# library("SNAPGRAZEr")
+
+```
+
+## The Data
+
+We have geopackages and dataframes representing the same information. The former is spatially explicit and allows us to do some mapping while the latter avoids the complications of working with spatial data (which is unnecessary for the SNAPGRAZE model). 
+
+These represent:
+
+ 1. Ground obseration points where soil samples were collected
+
+ 2. Regularly sampled points within a 200 m radius of the ground observations (approx. 20 per sample site)
+
+ 3. Randomly sampled points within the grazing area boundary that the soil samples have been taken from (approx. 100 per boundary)
+
+ 4. Grazing area boundaries that the soil samples have been taken from
+
+There's a slight complication in that we also sampled some reference cores outside our formal grazing association boundaries. We have therefore delineated additional theoretical grazing areas that encompass those reference sites so that we can still model them in the same manner as our grazing areas. This shouldn't create any issues for us, but is worth noting. 
+
+```{r Read in input data}
+
+# GeoPackages
+aoi_obs    = st_read("data/snapgraze-input/aoi_snapgraze_inputs_observations.gpkg")
+aoi_sample = st_read("data/snapgraze-input/aoi_snapgraze_inputs_sampleobs.gpkg")
+aoi_rand   = st_read("data/snapgraze-input/aoi_snapgraze_inputs_randombound.gpkg")
+aoi_bound  = st_read("data/snapgraze-input/aoi_snapgraze_inputs_boundaries.gpkg")
+
+# Dataframes
+df_obs    = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_observations.csv")
+df_sample = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_sampleobs.csv")
+df_rand   = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_randombound.csv")
+df_bound  = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_boundaries.csv")
+
+
+```
+
+## Visualisation
+
+To get a sense for what this looks like, we're going to make an interactive map of the spatial data.
+
+You can toggle the different layers from the menu on the top left and click on any of the features to view their attributes.
+
+```{r Map the data}
+
+tmap_mode("view")
+
+tm_shape(aoi_bound, id = "Association") +
+  tm_polygons(alpha = 0) +
+  tm_shape(aoi_rand) +
+  tm_dots(shape = 21, border.col = "brown", size = 0.01, alpha = 0) +
+  tm_shape(aoi_sample, id = "Site_ID") +
+  tm_dots(shape = 21, border.col = "blue", alpha = 0) +
+  tm_shape(aoi_obs) +
+  tm_dots(shape = 21, border.col = "black", col = "blue") +
+  tm_basemap(c("Esri.NatGeoWorldMap", "OpenStreetMap"))
+  
+
+```
+
+

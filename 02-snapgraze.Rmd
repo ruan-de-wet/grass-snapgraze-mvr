@@ -1,0 +1,241 @@
+---
+title: "Building SNAPGRAZE model"
+author: "Ruan de Wet"
+date: "2022-10-17"
+output: html_document
+---
+
+## Introduction 
+
+The full details of SNAPGRAZE won't be covered here. The purpose is simply to parameterize the model using the input data we've already compiled. 
+
+An R package has been published to GitHub with the SNAPGRAZE model equations. This is installed in the first code chunk for reference. 
+
+```{r Load packages}
+
+library("readr")
+
+library("tidyr")
+library("dplyr")
+# library("stringr")
+
+library("ggplot2")
+
+library("sf")
+library("tmap")
+
+devtools::install_github("ruan-de-wet/SNAPGRAZEr")
+library("SNAPGRAZEr")
+
+```
+
+## Importing data
+
+We've already had a look at the four different input datasets in the EDA script. We don't need to read in the geopackages, but the dataframes represent the same information. 
+
+```{r Read in input data}
+
+# Dataframes
+df_obs    = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_observations.csv")
+df_sample = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_sampleobs.csv")
+df_rand   = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_randombound.csv")
+df_bound  = read_csv("data/snapgraze-input/aoi_snapgraze_inputs_boundaries.csv")
+
+
+```
+
+## Modelling
+
+The model is being run with all the intermediate steps shown. There is a SNAPGRAZE wrapper function, but it's a bit too black box for me so I'm sticking with the intermediate steps. 
+
+There are some adjustments we need to make to certain parameters in order to prepare them for the model. 
+
+For example, the livestock data units are currently head per km2 and we need them to be total number of livestock. We also want to combine cattle, sheep and goats into "livestock units" (LSUs). This represents an average cattle, so we just need to scale sheep and goats by 0.1 and then add them all together. 
+
+For the point data (the first three dataframes), we have the option of taking the fire frequency at the point or the average fire frequency for the grazing area (Fire_elig).
+
+There are also some assumptions that we're making in the model. 
+
+  1. The average weight of cattle = 475 kg
+
+  2. The proportion of lignin and cellulose (ligcell) in the fodder is = 30%
+  
+  3. The baseline grazing practices were open grazing all year round
+  
+Lastly, we have calculated the proportion of the grazing area that is eligible for grazing so that we can account for the other land cover classes, such as residential areas, croplands, water, etc. For our modelling purposes, this is used in a few ways. 
+
+The fire frequency was averaged for the grazing boundaries only based on the fires that occured on eligible grazing areas. If, for example, 50% of the boundary burned, but that 50% was the entirety of the grazable land, then 100% of the eligible grazing area actually burned. Similarly, the livestock density (d_headha) should be based on the livestock per eligible grazing area, not accounting for all the areas that can't be grazed. Hopefully, that makes sense. 
+
+```{r Observation SOC prediction}
+
+df_obs_out = df_obs %>%
+  mutate(Burn = Fire_elig, # Taking the average fire frequency for the whole grazing area. Change to 'Burn = fire' for point data.
+         Cattle_head = (cattle*Area_ha)/100,
+         Goat_head = (goat*Area_ha)/100,
+         Sheep_head = (sheep*Area_ha)/100,
+         LSU_head = Cattle_head+0.1*(Goat_head + Sheep_head),
+         Ligcell = 0.3,
+         W_kg = 475,
+         Days = 365,
+         npastures = 1,
+         d_headha = LSU_head/Elig_ha/npastures,
+         Gdays = 22.99*mat-0.94*mat^2+0.073*map,
+         ANPPmax_gm2 = calc_ANPPmax(map, mat, sand),
+         Sk_gm2 = ANPPmax_gm2/0.9,
+         Ddays = Gdays - (365 - Days),
+         Edays = (Gdays-Ddays)/2,
+         S0_gm2 = 0.1*Sk_gm2,
+         Fdays = Gdays - (Edays+Ddays),
+         Cg_gheadday = 2*(5300+770*log(W_kg)),
+         Se_gm2 = calc_SE(Sk_gm2, Edays),
+         g_ggday = (d_headha*Cg_gheadday*npastures*10^(-4))/Se_gm2,
+         Lg_gm2 = calc_Lg(Ddays, d_headha, npastures, W_kg),
+         Sg_gm2 = calc_Sg(Sk_gm2, Se_gm2, Lg_gm2, Ddays, npastures, 
+                          d_headha, r = 0.05, W_kg, Cg_gheadday),
+         Sf_gm2 = calc_Sf(Sk_gm2, Sg_gm2, r = 0.05, Fdays),
+         Lo_gm2 = calc_Lo(Cg_gheadday, Gdays, d_headha),
+         ANPPt_est = calc_ANPPest(Se_gm2, Sg_gm2, Sf_gm2, Sk_gm2),
+         BNPPt_est = calc_BNPPest(map, mat, ANPPt_est, Sk_gm2),
+         PDSOCt = calc_PDSOCt(BNPPt_est, Sf_gm2, Lo_gm2, Ligcell, Burn),
+         DDSOCt = calc_DDSOCt(Ligcell, Ddays, Cg_gheadday, npastures, d_headha, Lo_gm2),
+         SOCeq_gm2 = calc_SOCeq(PDSOCt, DDSOCt, sand, map, Gdays),
+         SOCeq_tha = SOCeq_gm2/100)
+
+```
+
+```{r Sampled SOC prediction}
+
+df_sample_out = df_sample %>%
+  mutate(Burn = Fire_elig, # Taking the average fire frequency for the whole grazing area. Change to 'Burn = fire' for point data.
+         Cattle_head = (cattle*Area_ha)/100,
+         Goat_head = (goat*Area_ha)/100,
+         Sheep_head = (sheep*Area_ha)/100,
+         LSU_head = Cattle_head+0.1*(Goat_head + Sheep_head),
+         Ligcell = 0.3,
+         W_kg = 475,
+         Days = 365,
+         npastures = 1,
+         d_headha = LSU_head/Elig_ha/npastures,
+         Gdays = 22.99*mat-0.94*mat^2+0.073*map,
+         ANPPmax_gm2 = calc_ANPPmax(map, mat, sand),
+         Sk_gm2 = ANPPmax_gm2/0.9,
+         Ddays = Gdays - (365 - Days),
+         Edays = (Gdays-Ddays)/2,
+         S0_gm2 = 0.1*Sk_gm2,
+         Fdays = Gdays - (Edays+Ddays),
+         Cg_gheadday = 2*(5300+770*log(W_kg)),
+         Se_gm2 = calc_SE(Sk_gm2, Edays),
+         g_ggday = (d_headha*Cg_gheadday*npastures*10^(-4))/Se_gm2,
+         Lg_gm2 = calc_Lg(Ddays, d_headha, npastures, W_kg),
+         Sg_gm2 = calc_Sg(Sk_gm2, Se_gm2, Lg_gm2, Ddays, npastures, 
+                          d_headha, r = 0.05, W_kg, Cg_gheadday),
+         Sf_gm2 = calc_Sf(Sk_gm2, Sg_gm2, r = 0.05, Fdays),
+         Lo_gm2 = calc_Lo(Cg_gheadday, Gdays, d_headha),
+         ANPPt_est = calc_ANPPest(Se_gm2, Sg_gm2, Sf_gm2, Sk_gm2),
+         BNPPt_est = calc_BNPPest(map, mat, ANPPt_est, Sk_gm2),
+         PDSOCt = calc_PDSOCt(BNPPt_est, Sf_gm2, Lo_gm2, Ligcell, Burn),
+         DDSOCt = calc_DDSOCt(Ligcell, Ddays, Cg_gheadday, npastures, d_headha, Lo_gm2),
+         SOCeq_gm2 = calc_SOCeq(PDSOCt, DDSOCt, sand, map, Gdays),
+         SOCeq_tha = SOCeq_gm2/100)
+
+```
+
+```{r Random SOC prediction}
+
+df_rand_out = df_rand %>%
+  mutate(Burn = Fire_elig, # Taking the average fire frequency for the whole grazing area. Change to 'Burn = fire' for point data.
+         Cattle_head = (cattle*Area_ha)/100,
+         Goat_head = (goat*Area_ha)/100,
+         Sheep_head = (sheep*Area_ha)/100,
+         LSU_head = Cattle_head+0.1*(Goat_head + Sheep_head),
+         Ligcell = 0.3,
+         W_kg = 475,
+         Days = 365,
+         npastures = 1,
+         d_headha = LSU_head/Elig_ha/npastures,
+         Gdays = 22.99*mat-0.94*mat^2+0.073*map,
+         ANPPmax_gm2 = calc_ANPPmax(map, mat, sand),
+         Sk_gm2 = ANPPmax_gm2/0.9,
+         Ddays = Gdays - (365 - Days),
+         Edays = (Gdays-Ddays)/2,
+         S0_gm2 = 0.1*Sk_gm2,
+         Fdays = Gdays - (Edays+Ddays),
+         Cg_gheadday = 2*(5300+770*log(W_kg)),
+         Se_gm2 = calc_SE(Sk_gm2, Edays),
+         g_ggday = (d_headha*Cg_gheadday*npastures*10^(-4))/Se_gm2,
+         Lg_gm2 = calc_Lg(Ddays, d_headha, npastures, W_kg),
+         Sg_gm2 = calc_Sg(Sk_gm2, Se_gm2, Lg_gm2, Ddays, npastures, 
+                          d_headha, r = 0.05, W_kg, Cg_gheadday),
+         Sf_gm2 = calc_Sf(Sk_gm2, Sg_gm2, r = 0.05, Fdays),
+         Lo_gm2 = calc_Lo(Cg_gheadday, Gdays, d_headha),
+         ANPPt_est = calc_ANPPest(Se_gm2, Sg_gm2, Sf_gm2, Sk_gm2),
+         BNPPt_est = calc_BNPPest(map, mat, ANPPt_est, Sk_gm2),
+         PDSOCt = calc_PDSOCt(BNPPt_est, Sf_gm2, Lo_gm2, Ligcell, Burn),
+         DDSOCt = calc_DDSOCt(Ligcell, Ddays, Cg_gheadday, npastures, d_headha, Lo_gm2),
+         SOCeq_gm2 = calc_SOCeq(PDSOCt, DDSOCt, sand, map, Gdays),
+         SOCeq_tha = SOCeq_gm2/100)
+
+```
+
+```{r Boundary SOC prediction}
+
+df_bound_out = df_bound %>%
+  mutate(Burn = Fire_elig, # This is the only option for the boundary data
+         Cattle_head = (cattle*Area_ha)/100,
+         Goat_head = (goat*Area_ha)/100,
+         Sheep_head = (sheep*Area_ha)/100,
+         LSU_head = Cattle_head+0.1*(Goat_head + Sheep_head),
+         Ligcell = 0.3,
+         W_kg = 475,
+         Days = 365,
+         npastures = 1,
+         d_headha = LSU_head/Elig_ha/npastures,
+         Gdays = 22.99*mat-0.94*mat^2+0.073*map,
+         ANPPmax_gm2 = calc_ANPPmax(map, mat, sand),
+         Sk_gm2 = ANPPmax_gm2/0.9,
+         Ddays = Gdays - (365 - Days),
+         Edays = (Gdays-Ddays)/2,
+         S0_gm2 = 0.1*Sk_gm2,
+         Fdays = Gdays - (Edays+Ddays),
+         Cg_gheadday = 2*(5300+770*log(W_kg)),
+         Se_gm2 = calc_SE(Sk_gm2, Edays),
+         g_ggday = (d_headha*Cg_gheadday*npastures*10^(-4))/Se_gm2,
+         Lg_gm2 = calc_Lg(Ddays, d_headha, npastures, W_kg),
+         Sg_gm2 = calc_Sg(Sk_gm2, Se_gm2, Lg_gm2, Ddays, npastures, 
+                          d_headha, r = 0.05, W_kg, Cg_gheadday),
+         Sf_gm2 = calc_Sf(Sk_gm2, Sg_gm2, r = 0.05, Fdays),
+         Lo_gm2 = calc_Lo(Cg_gheadday, Gdays, d_headha),
+         ANPPt_est = calc_ANPPest(Se_gm2, Sg_gm2, Sf_gm2, Sk_gm2),
+         BNPPt_est = calc_BNPPest(map, mat, ANPPt_est, Sk_gm2),
+         PDSOCt = calc_PDSOCt(BNPPt_est, Sf_gm2, Lo_gm2, Ligcell, Burn),
+         DDSOCt = calc_DDSOCt(Ligcell, Ddays, Cg_gheadday, npastures, d_headha, Lo_gm2),
+         SOCeq_gm2 = calc_SOCeq(PDSOCt, DDSOCt, sand, map, Gdays),
+         SOCeq_tha = SOCeq_gm2/100)
+
+
+```
+
+# Results
+
+Here are the final SOCeq predictions. 
+
+```{r Looking at the output}
+
+df_obs_out
+df_sample_out
+df_rand_out
+df_bound_out
+
+```
+
+```{r Save results, eval = F}
+
+df_obs_out    %>% write_csv("data/snapgraze-output/aoi_snapgraze_outputs_observations.csv")
+df_sample_out %>% write_csv("data/snapgraze-output/aoi_snapgraze_outputs_sampleobs.csv")
+df_rand_out   %>% write_csv("data/snapgraze-output/aoi_snapgraze_outputs_randombound.csv")
+df_bound_out  %>% write_csv("data/snapgraze-output/aoi_snapgraze_outputs_boundaries.csv")
+
+```
+
+
+
